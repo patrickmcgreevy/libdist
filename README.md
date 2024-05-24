@@ -1,0 +1,2 @@
+# libdist
+Distributed systems algorithms
