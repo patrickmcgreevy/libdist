@@ -5,10 +5,11 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"time"
 )
 
 func main() {
-	var N int = 100
+	var N int = 100000
 	processes := make([]*proc, N)
 	for i := 0; i < N; i++ {
 		processes[i] = NewProc()
@@ -23,13 +24,16 @@ func main() {
 		left.rightRecvChan = cur.leftSendChan
 	}
 
-	for _, v := range processes {
-		fmt.Println(v)
-	}
-
-    // elected, unelected := ElectLeaderN2(processes)
-    elected, unelected := ElectLeaderNLogN(processes)
-	fmt.Println(elected, unelected)
+    t0 := time.Now()
+    _, _ = ElectLeaderN2(processes)
+    dur1 := time.Since(t0)
+    fmt.Println("N2 alg took: ", dur1)
+	// fmt.Println(elected, unelected)
+    t0 = time.Now()
+    _, _ = ElectLeaderNLogN(processes)
+    dur2 := time.Since(t0)
+    fmt.Println("nlogn alg took: ", dur2)
+	// fmt.Println(elected, unelected)
 }
 
 /*
@@ -65,60 +69,53 @@ func ElectLeaderNLogN(processes []*proc) (elected []*proc, unelected []*proc) {
 
 func electLeaderNlogNStateMachine(p *proc) {
 	var err error = nil
-	var j, k, d int = 0, 0, 0
+	var id, round, hops int = 0, 0, 0
 	var msg string
+    var dir direction
 	var receivedProbes map[string]int = make(map[string]int)
+
 	// Send round-0 messages
 	p.SendLeft(fmtProbeMsg(p.id, 0, 1))
 	p.SendRight(fmtProbeMsg(p.id, 0, 1))
 
-	for i := 0; true; {
-		if len(p.rightRecvChan) > 0{
-            i = 0
-			msg = p.RecvRight()
-		} else  if len(p.leftRecvChan) > 0 {
-            i = 1
-			msg = p.RecvLeft()
-		} else {
-            continue
-        }
+	for {
+        msg, dir = p.WaitForMsg()
 
 		if msg == TerminationMsg {
-			// fmt.Printf("%d got termination msg", p.id)
 			p.terminate()
 			return
 		}
 
-		if j, k, d, err = scanProbeMsg(msg); err == nil {
+		if id, round, hops, err = scanProbeMsg(msg); err == nil {
 			// do probe stuff
-			if j == p.id {
+			if id == p.id {
 				p.isLeader = true
 				fmt.Printf("proc %d elected as leader!\n", p.id)
 				p.terminate()
 				return
-			} else if (j > p.id) && (d < int(math.Pow(2, float64(k)))) {
-				if i%2 == 0 {
-					p.SendLeft(fmtProbeMsg(j, k, d+1))
+			} else if (id > p.id) && (hops < int(math.Pow(2, float64(round)))) {
+				if dir == Right {
+					p.SendLeft(fmtProbeMsg(id, round, hops+1))
 				} else {
-					p.SendRight(fmtProbeMsg(j, k, d+1))
+					p.SendRight(fmtProbeMsg(id, round, hops+1))
 				}
-			} else if (j > p.id) && (d >= int(math.Pow(2, float64(k)))) {
-				if i%2 == 0 {
-					p.SendRight(fmtReplyMsg(j, k))
+			} else if (id > p.id) && (hops >= int(math.Pow(2, float64(round)))) {
+				if dir == Right {
+					p.SendRight(fmtReplyMsg(id, round))
 				} else {
-					p.SendLeft(fmtReplyMsg(j, k))
+					p.SendLeft(fmtReplyMsg(id, round))
 				}
 			} else {
 				//pass
 			}
-		} else if j, k, err = scanReplyMsg(msg); err == nil {
+		} else if id, round, err = scanReplyMsg(msg); err == nil {
 			// do reply stuff
-			if j != p.id {
+			if id != p.id {
 				// forward reply
-				if i%2 == 0 {
-					p.SendLeft(fmtReplyMsg(j, k))
+				if dir == Right {
+					p.SendLeft(fmtReplyMsg(id, round))
 				} else {
-					p.SendRight(fmtReplyMsg(j, k))
+					p.SendRight(fmtReplyMsg(id, round))
 				}
 			} else {
 				if _, ok := receivedProbes[msg]; !ok {
@@ -126,8 +123,8 @@ func electLeaderNlogNStateMachine(p *proc) {
 					receivedProbes[msg] = 1
 				} else {
 					// fmt.Printf("proc %d won round %d!\n", p.id, k)
-					p.SendLeft(fmtProbeMsg(p.id, k+1, 1))
-					p.SendRight(fmtProbeMsg(p.id, k+1, 1))
+					p.SendLeft(fmtProbeMsg(p.id, round+1, 1))
+					p.SendRight(fmtProbeMsg(p.id, round+1, 1))
 				}
 			}
 		} else {
@@ -216,24 +213,36 @@ func NewProc() *proc {
 	return &proc{
 		id:            -1,
 		isLeader:      false,
-		leftRecvChan:  make(chan string, 100),
-		leftSendChan:  make(chan string, 100),
-		rightSendChan: make(chan string, 100),
-		rightRecvChan: make(chan string, 100),
+		leftRecvChan:  make(chan string, 2),
+		leftSendChan:  make(chan string, 2),
+		rightSendChan: make(chan string, 2),
+		rightRecvChan: make(chan string, 2),
 	}
 }
 
 func (p *proc) String() string {
-	return fmt.Sprintf("processes %d: sl(%x) rl(%x) sr(%x) rr(%x)",
+	return fmt.Sprintf("processes %d: IsLeader(%v)",
 		p.id,
-		p.leftSendChan,
-		p.leftRecvChan,
-		p.rightSendChan,
-		p.rightRecvChan)
+		p.IsLeader())
 }
 
 func (p *proc) IsLeader() bool {
 	return p.isLeader
+}
+
+type direction int
+const (
+    Left direction = iota
+    Right
+)
+
+func (p *proc) WaitForMsg() (msg string, dir direction) {
+    select {
+    case msg = <-p.leftRecvChan:
+        return msg, Left
+    case msg = <-p.rightRecvChan:
+        return msg, Right
+    }
 }
 
 func (p *proc) SendLeft(msg string) {
