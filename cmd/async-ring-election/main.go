@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	var N int = 100000
+	var N int = 10000
 	processes := make([]*proc, N)
 	for i := 0; i < N; i++ {
 		processes[i] = NewProc()
@@ -24,31 +24,31 @@ func main() {
 		left.rightRecvChan = cur.leftSendChan
 	}
 
+	participants := make([]Participant, len(processes))
+	for i, v := range processes {
+		participants[i] = v
+	}
+
     t0 := time.Now()
-    _, _ = ElectLeaderN2(processes)
-    dur1 := time.Since(t0)
-    fmt.Println("N2 alg took: ", dur1)
-	// fmt.Println(elected, unelected)
-    t0 = time.Now()
-    _, _ = ElectLeaderNLogN(processes)
-    dur2 := time.Since(t0)
-    fmt.Println("nlogn alg took: ", dur2)
-	// fmt.Println(elected, unelected)
+    Cluster(participants).RunElection(electLeaderNlogNStateMachine)
+	dur2 := time.Since(t0)
+	fmt.Println("nlogn alg took: ", dur2)
 }
 
 /*
 processes must be slice of pointesr to processes that have been initialized
 with shared channels and unique, sequential ids.
 */
-func ElectLeaderNLogN(processes []*proc) (elected []*proc, unelected []*proc) {
+type Cluster []Participant
+func (c Cluster) ElectLeaderNLogN() (elected []Participant, unelected []Participant) {
 	var wg sync.WaitGroup
-	size := len(processes)
-	elected = make([]*proc, 0, 1)
-	unelected = make([]*proc, 0, size)
+	size := len(c)
+	elected = make([]Participant, 0, 1)
+	unelected = make([]Participant, 0, size)
 
-	for _, p := range processes {
+	for _, p := range c {
 		wg.Add(1)
-		go func(p *proc) {
+		go func(p Participant) {
 			defer wg.Done()
 			electLeaderNlogNStateMachine(p)
 		}(p)
@@ -56,7 +56,7 @@ func ElectLeaderNLogN(processes []*proc) (elected []*proc, unelected []*proc) {
 
 	wg.Wait()
 
-	for _, p := range processes {
+	for _, p := range c {
 		if p.IsLeader() {
 			elected = append(elected, p)
 		} else {
@@ -67,39 +67,39 @@ func ElectLeaderNLogN(processes []*proc) (elected []*proc, unelected []*proc) {
 	return elected, unelected
 }
 
-func electLeaderNlogNStateMachine(p *proc) {
+func electLeaderNlogNStateMachine(p Participant) {
 	var err error = nil
 	var id, round, hops int = 0, 0, 0
 	var msg string
-    var dir direction
+	var dir Direction
 	var receivedProbes map[string]int = make(map[string]int)
 
 	// Send round-0 messages
-	p.SendLeft(fmtProbeMsg(p.id, 0, 1))
-	p.SendRight(fmtProbeMsg(p.id, 0, 1))
+	p.SendLeft(fmtProbeMsg(p.Id(), 0, 1))
+	p.SendRight(fmtProbeMsg(p.Id(), 0, 1))
 
 	for {
-        msg, dir = p.WaitForMsg()
+		msg, dir = p.WaitForMsg()
 
 		if msg == TerminationMsg {
-			p.terminate()
+			p.Terminate()
 			return
 		}
 
 		if id, round, hops, err = scanProbeMsg(msg); err == nil {
 			// do probe stuff
-			if id == p.id {
-				p.isLeader = true
-				fmt.Printf("proc %d elected as leader!\n", p.id)
-				p.terminate()
+			if id == p.Id() {
+                p.SetLeader(true)
+				fmt.Printf("proc %d elected as leader!\n", p.Id())
+				p.Terminate()
 				return
-			} else if (id > p.id) && (hops < int(math.Pow(2, float64(round)))) {
+			} else if (id > p.Id()) && (hops < int(math.Pow(2, float64(round)))) {
 				if dir == Right {
 					p.SendLeft(fmtProbeMsg(id, round, hops+1))
 				} else {
 					p.SendRight(fmtProbeMsg(id, round, hops+1))
 				}
-			} else if (id > p.id) && (hops >= int(math.Pow(2, float64(round)))) {
+			} else if (id > p.Id()) && (hops >= int(math.Pow(2, float64(round)))) {
 				if dir == Right {
 					p.SendRight(fmtReplyMsg(id, round))
 				} else {
@@ -110,7 +110,7 @@ func electLeaderNlogNStateMachine(p *proc) {
 			}
 		} else if id, round, err = scanReplyMsg(msg); err == nil {
 			// do reply stuff
-			if id != p.id {
+			if id != p.Id() {
 				// forward reply
 				if dir == Right {
 					p.SendLeft(fmtReplyMsg(id, round))
@@ -123,8 +123,8 @@ func electLeaderNlogNStateMachine(p *proc) {
 					receivedProbes[msg] = 1
 				} else {
 					// fmt.Printf("proc %d won round %d!\n", p.id, k)
-					p.SendLeft(fmtProbeMsg(p.id, round+1, 1))
-					p.SendRight(fmtProbeMsg(p.id, round+1, 1))
+					p.SendLeft(fmtProbeMsg(p.Id(), round+1, 1))
+					p.SendRight(fmtProbeMsg(p.Id(), round+1, 1))
 				}
 			}
 		} else {
@@ -138,17 +138,17 @@ func electLeaderNlogNStateMachine(p *proc) {
 processes must be slice of pointesr to processes that have been initialized
 with shared channels and unique, sequential ids.
 */
-func ElectLeaderN2(processes []*proc) (elected []*proc, unelected []*proc) {
+func (processes Cluster) RunElection(stateMachine func(Participant)) (elected []Participant, unelected []Participant) {
 	var wg sync.WaitGroup
 	size := len(processes)
-	elected = make([]*proc, 0, 1)
-	unelected = make([]*proc, 0, size)
+	elected = make([]Participant, 0, 1)
+	unelected = make([]Participant, 0, size)
 
 	for _, p := range processes {
 		wg.Add(1)
-		go func(p *proc) {
+		go func(p Participant) {
 			defer wg.Done()
-			electLeaderN2StateMachine(p)
+			stateMachine(p)
 		}(p)
 	}
 
@@ -165,8 +165,8 @@ func ElectLeaderN2(processes []*proc) (elected []*proc, unelected []*proc) {
 	return elected, unelected
 }
 
-func electLeaderN2StateMachine(p *proc) {
-	p.SendRight(fmt.Sprintf(IdMsgFmt, p.id))
+func electLeaderN2StateMachine(p Participant) {
+	p.SendRight(fmt.Sprintf(IdMsgFmt, p.Id()))
 	for {
 		rightMsg := p.RecvLeft()
 		if rightMsg == TerminationMsg {
@@ -179,12 +179,12 @@ func electLeaderN2StateMachine(p *proc) {
 			fmt.Printf("no errors are allowed but an error ocurred!! %s\n", err.Error())
 			panic(err.Error())
 		}
-		if rId == int64(p.id) {
-			p.isLeader = true
+		if rId == int64(p.Id()) {
+			p.SetLeader(true)
 			p.SendRight(TerminationMsg)
-			fmt.Printf("Node %d has been elected leader!\n", p.id)
+			fmt.Printf("Node %d has been elected leader!\n", p.Id())
 			return
-		} else if rId > int64(p.id) {
+		} else if rId > int64(p.Id()) {
 			p.SendRight(rightMsg)
 		} else {
 			continue
@@ -193,12 +193,18 @@ func electLeaderN2StateMachine(p *proc) {
 }
 
 type Participant interface {
+	Id() int
 	IsLeader() bool
+	SetLeader(bool)
 	SendLeft(string)
 	RecvLeft() string
 	SendRight(string)
 	RecvRight() string
+	WaitForMsg() (string, Direction)
+    Terminate()
 }
+
+var _ Participant = &proc{}
 
 type proc struct {
 	id            int
@@ -226,23 +232,32 @@ func (p *proc) String() string {
 		p.IsLeader())
 }
 
+func (p *proc) Id() int {
+	return p.id
+}
+
+func (p *proc) SetLeader(l bool) {
+	p.isLeader = l
+}
+
 func (p *proc) IsLeader() bool {
 	return p.isLeader
 }
 
-type direction int
+type Direction int
+
 const (
-    Left direction = iota
-    Right
+	Left Direction = iota
+	Right
 )
 
-func (p *proc) WaitForMsg() (msg string, dir direction) {
-    select {
-    case msg = <-p.leftRecvChan:
-        return msg, Left
-    case msg = <-p.rightRecvChan:
-        return msg, Right
-    }
+func (p *proc) WaitForMsg() (msg string, dir Direction) {
+	select {
+	case msg = <-p.leftRecvChan:
+		return msg, Left
+	case msg = <-p.rightRecvChan:
+		return msg, Right
+	}
 }
 
 func (p *proc) SendLeft(msg string) {
@@ -267,7 +282,7 @@ func (p *proc) RecvRight() string {
 	return msg
 }
 
-func (p *proc) terminate() {
+func (p *proc) Terminate() {
 	p.SendLeft(TerminationMsg)
 }
 
