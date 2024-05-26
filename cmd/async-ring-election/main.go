@@ -10,36 +10,58 @@ import (
 
 func main() {
 	var N int = 10000
-	processes := make([]*proc, N)
-	for i := 0; i < N; i++ {
-		processes[i] = NewProc()
-		processes[i].id = i
-	}
 
-	for i := 0; i < N; i++ {
-		// The channel must be a *buffered* channel!
-		cur := processes[i]
-		left := processes[(i+1)%N]
-		cur.leftRecvChan = left.rightSendChan
-		left.rightRecvChan = cur.leftSendChan
-	}
+    processes := NewProcSlice(N)
 
 	participants := make([]Participant, len(processes))
 	for i, v := range processes {
 		participants[i] = v
 	}
 
-    t0 := time.Now()
-    Cluster(participants).RunElection(electLeaderNlogNStateMachine)
+	t0 := time.Now()
+	Cluster(participants).RunElection(electLeaderNlogNStateMachine)
 	dur2 := time.Since(t0)
 	fmt.Println("nlogn alg took: ", dur2)
 }
 
-/*
-processes must be slice of pointesr to processes that have been initialized
-with shared channels and unique, sequential ids.
-*/
 type Cluster []Participant
+
+// func NewCluster(participants ...Participant) Cluster {
+//     c := make(Cluster, 0, 100)
+//     for _, p := range participants {
+//         c = append(c, p)
+//     }
+//
+//     return c
+// }
+
+func (processes Cluster) RunElection(stateMachine func(Participant)) (elected []Participant, unelected []Participant) {
+	var wg sync.WaitGroup
+	size := len(processes)
+	elected = make([]Participant, 0, 1)
+	unelected = make([]Participant, 0, size)
+
+	for _, p := range processes {
+		wg.Add(1)
+		go func(p Participant) {
+			defer wg.Done()
+			stateMachine(p)
+		}(p)
+	}
+
+	wg.Wait()
+
+	for _, p := range processes {
+		if p.IsLeader() {
+			elected = append(elected, p)
+		} else {
+			unelected = append(unelected, p)
+		}
+	}
+
+	return elected, unelected
+}
+
 func (c Cluster) ElectLeaderNLogN() (elected []Participant, unelected []Participant) {
 	var wg sync.WaitGroup
 	size := len(c)
@@ -89,7 +111,7 @@ func electLeaderNlogNStateMachine(p Participant) {
 		if id, round, hops, err = scanProbeMsg(msg); err == nil {
 			// do probe stuff
 			if id == p.Id() {
-                p.SetLeader(true)
+				p.SetLeader(true)
 				fmt.Printf("proc %d elected as leader!\n", p.Id())
 				p.Terminate()
 				return
@@ -134,37 +156,6 @@ func electLeaderNlogNStateMachine(p Participant) {
 	}
 }
 
-/*
-processes must be slice of pointesr to processes that have been initialized
-with shared channels and unique, sequential ids.
-*/
-func (processes Cluster) RunElection(stateMachine func(Participant)) (elected []Participant, unelected []Participant) {
-	var wg sync.WaitGroup
-	size := len(processes)
-	elected = make([]Participant, 0, 1)
-	unelected = make([]Participant, 0, size)
-
-	for _, p := range processes {
-		wg.Add(1)
-		go func(p Participant) {
-			defer wg.Done()
-			stateMachine(p)
-		}(p)
-	}
-
-	wg.Wait()
-
-	for _, p := range processes {
-		if p.IsLeader() {
-			elected = append(elected, p)
-		} else {
-			unelected = append(unelected, p)
-		}
-	}
-
-	return elected, unelected
-}
-
 func electLeaderN2StateMachine(p Participant) {
 	p.SendRight(fmt.Sprintf(IdMsgFmt, p.Id()))
 	for {
@@ -201,7 +192,7 @@ type Participant interface {
 	SendRight(string)
 	RecvRight() string
 	WaitForMsg() (string, Direction)
-    Terminate()
+	Terminate()
 }
 
 var _ Participant = &proc{}
@@ -213,6 +204,24 @@ type proc struct {
 	leftRecvChan  chan string
 	rightSendChan chan string
 	rightRecvChan chan string
+}
+
+func NewProcSlice(n int) []*proc {
+	processes := make([]*proc, n)
+	for i := 0; i < n; i++ {
+		processes[i] = NewProc()
+		processes[i].id = i
+	}
+
+	for i := 0; i < n; i++ {
+		// The channel must be a *buffered* channel!
+		cur := processes[i]
+		left := processes[(i+1)%n]
+		cur.leftRecvChan = left.rightSendChan
+		left.rightRecvChan = cur.leftSendChan
+	}
+
+    return processes
 }
 
 func NewProc() *proc {
